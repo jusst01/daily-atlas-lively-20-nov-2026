@@ -72,6 +72,7 @@ CLIPS = []
 DRAWN_NUMS = set()
 DRAWN_ART = set()
 SOURCE_CHIPS = 0
+GRID_SEP = {}
 
 
 def textlen(t, font):
@@ -719,10 +720,25 @@ def draw_grid(d, gy):
         SOURCE_CHIPS += 1
 
         DRAWN_NUMS.add(st["num"])
-        y = block(d, x + 8, y0 + 47, 222, st["head"], F(SERIF_B, 12), 12.5,
-                  y0 + 72, fill=INK)
-        block(d, x + 8, y, 222, st["summ"], F(SERIF, 8.5), 9.5, y0 + 83,
+        hfont = F(SERIF_B, 12)
+        hlines = wrap(st["head"], hfont, 222)
+        h_asc, h_desc = hfont.getmetrics()
+        head_bottom = y0 + 47 + (len(hlines) - 1) * 12.5 + h_asc + h_desc
+        block(d, x + 8, y0 + 47, 222, st["head"], hfont, 12.5,
+              y0 + 72, fill=INK)
+        # the summary must begin below the headline's real last line
+        summ_top = max(y0 + 60, head_bottom + 2)
+        ssize = 8.5
+        while True:
+            sfont = F(SERIF, ssize)
+            slh = ssize + 1.0
+            nsl = len(wrap(st["summ"], sfont, 222))
+            if summ_top + nsl * slh <= y0 + 83 + 0.01 or ssize <= 7.5:
+                break
+            ssize -= 0.5
+        block(d, x + 8, summ_top, 222, st["summ"], sfont, slh, y0 + 83,
               fill=INK)
+        GRID_SEP[st["num"]] = (round(head_bottom, 1), round(summ_top, 1))
 
 
 # ---------------------------------------------------------------- map
@@ -921,6 +937,9 @@ def main():
     assert n_cells == 6, "stat cells: %d" % n_cells
     assert n_dc <= 2
     assert SOURCE_CHIPS == 15, "source chips: %d" % SOURCE_CHIPS
+    assert len(GRID_SEP) == 12, "grid separation records: %d" % len(GRID_SEP)
+    bad = {n: v for n, v in GRID_SEP.items() if not v[0] < v[1]}
+    assert not bad, "headline/summary collision on grid cards: %r" % (bad,)
 
     img.save(OUT, "PNG", optimize=True)
     size = os.path.getsize(OUT)
@@ -936,7 +955,7 @@ def main():
     print("band_h %.1f, dc_y %.1f, footer bottom %.1f"
           % (band_h, dc_y, dc_y + 42))
     print("wrote %s  %d bytes  (%.1f KiB)" % (OUT, size, size / 1024.0))
-    print("Assertion summary: no CLIP failures; all 33 story numbers drawn; three featured artworks (bridges, cyclone, cop31) loaded and pasted; region bar's 7 segments drawn; stat strip's 6 cells drawn; DATE CHECK text drawn in at most 2 lines (%d lines); source chip drawn for each of the 15 card stories (%d chips)." % (n_dc, SOURCE_CHIPS))
+    print("Assertion summary: no CLIP failures; all 33 story numbers drawn; three featured artworks (bridges, cyclone, cop31) loaded and pasted; region bar's 7 segments drawn; stat strip's 6 cells drawn; DATE CHECK text drawn in at most 2 lines (%d lines); source chip drawn for each of the 15 card stories (%d chips); headline/summary separation assertion passed for all %d grid cards." % (n_dc, SOURCE_CHIPS, len(GRID_SEP)))
 
 
 if __name__ == "__main__":
