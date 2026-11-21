@@ -1,962 +1,858 @@
-#!/usr/bin/env python3
-"""THE DAILY ATLAS - a 1024x1024 newspaper front page for 20 November 2026.
-
-Renders the whole page from the story data below with Pillow and saves
-entry.png next to this file.  Flat colour fills, crisp text, no texture.
-"""
-
 import os
 import sys
-
-import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+import numpy as np
+import hashlib
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-FONT_DIR = "/usr/share/fonts/truetype/dejavu"
-SIDE = 1024
-OUT = os.path.join(HERE, "entry.png")
-
-# ---------------------------------------------------------------- palette
-PAPER = (243, 245, 247)
-CARD = (252, 253, 255)
-INK = (20, 24, 34)
-GREY = (96, 100, 110)
-ACCENT = (30, 52, 110)
-TEAL = (44, 96, 88)
-NAVY = (38, 58, 92)
-BORDER = (188, 194, 204)
-RED = (172, 62, 44)            # DATE CHECK red
-SEA = (44, 92, 140)
-SLATE = (52, 58, 66)
-PALE = (232, 236, 244)
-SRC = (90, 88, 80)
-
-CONT = {
-    "Americas": (168, 62, 44),
-    "Europe": (58, 84, 128),
-    "Mideast": (186, 122, 38),
-    "Africa": (122, 106, 52),
-    "Asia": (116, 80, 148),
-    "Oceania": (44, 124, 134),
-}
-CONT_ORDER = ["Americas", "Europe", "Mideast", "Africa", "Asia", "Oceania"]
-
-
-def mute(col, k=0.52):
-    """Blend a colour toward the paper colour."""
-    return tuple(int(round(c + (p - c) * k)) for c, p in zip(col, PAPER))
-
-
-# ---------------------------------------------------------------- fonts
-_FCACHE = {}
-
-
-def F(name, size):
-    key = (name, size)
-    if key not in _FCACHE:
-        _FCACHE[key] = ImageFont.truetype(os.path.join(FONT_DIR, name), size)
-    return _FCACHE[key]
-
-
-SERIF_B = "DejaVuSerif-Bold.ttf"
-SERIF = "DejaVuSerif.ttf"
-SANS_B = "DejaVuSans-Bold.ttf"
-SANS = "DejaVuSans.ttf"
-_ITAL = os.path.join(FONT_DIR, "DejaVuSerif-Italic.ttf")
-SERIF_I = "DejaVuSerif-Italic.ttf" if os.path.exists(_ITAL) else SERIF
-
-# ---------------------------------------------------------------- state
-_img = Image.new("RGB", (10, 10), PAPER)
-_measure = ImageDraw.Draw(_img)
-CLIPS = []
-DRAWN_NUMS = set()
-DRAWN_ART = set()
-SOURCE_CHIPS = 0
-GRID_SEP = {}
-
-
-def textlen(t, font):
-    return _measure.textlength(t, font=font)
-
-
-def wrap(text, font, max_width):
-    """Greedy word wrap using draw.textlength."""
-    words = text.split()
-    lines, cur = [], ""
-    for w in words:
-        trial = (cur + " " + w).strip()
-        if textlen(trial, font) <= max_width or not cur:
-            cur = trial
-        else:
-            lines.append(cur)
-            cur = w
-    if cur:
-        lines.append(cur)
-    return lines
-
-
-def block(d, x, y, w, text, font, line_height, max_y, fill=INK, align="la"):
-    """Draw wrapped lines from y while the next line still fits below max_y."""
-    lines = wrap(text, font, w)
-    for ln in lines:
-        if y + line_height > max_y + 0.01:
-            CLIPS.append((text[:40], round(y + line_height, 1), max_y))
-            break
-        if align == "ma":
-            d.text((x + w / 2.0, y), ln, font=font, fill=fill, anchor="ma")
-        else:
-            d.text((x, y), ln, font=font, fill=fill, anchor="la")
-        y += line_height
-    return y
-
-
-def chip(d, cx, cy, r, n, fill):
-    """Filled circle with the story number in white Sans-Bold."""
-    d.ellipse((cx - r, cy - r, cx + r, cy + r), fill=fill)
-    d.text((cx, cy), str(n), font=F(SANS_B, r * 1.12), fill=(255, 255, 255),
-           anchor="mm")
-
-
-def pill(d, x0, y0, x1, y1, rad, fill):
-    d.rounded_rectangle((x0, y0, x1, y1), radius=rad, fill=fill)
-
-
-def fit_font(name, text, size, max_w, floor=6.0):
-    """Largest font size (<= size) at which text fits max_w."""
-    s = size
-    while s > floor and textlen(text, F(name, s)) > max_w:
-        s -= 0.2
-    return F(name, s)
-
-
-# ---------------------------------------------------------------- data
-FEATURED = [
-    dict(num=1, kick="KYIV · WAR", tag="THREE BRIDGES IN ONE NIGHT",
-         tagcol=RED, chip="CONFIRMED · REUTERS",
-         head="Kyiv's bridges hit in one night",
-         summ="Russia's overnight barrage damages three Dnipro crossings — "
-              "Podilskyi, Darnytskyi and Southern. Three water workers killed, "
-              "about 15 injured.",
-         art="bridges"),
-    dict(num=2, kick="GOPALPUR · STORM", tag="LANDFALL AT DAWN",
-         tagcol=SEA, chip="CONFIRMED · IMD",
-         head="Cyclone Akvan comes ashore",
-         summ="Akvan crosses the Odisha coast weakened to 70-80 km/h, below "
-              "forecast. 300,000+ evacuated; no major damage reported.",
-         art="cyclone"),
-    dict(num=3, kick="ANTALYA · CLIMATE", tag="FINAL DAY · NO DEAL",
-         tagcol=ACCENT, chip="CONFIRMED · REUTERS",
-         head="COP31's last day, no deal",
-         summ="The revised draft drops every mention of fossil fuels. 92,000 "
-              "attendees — the largest COP ever; talks may run into the "
-              "weekend.",
-         art="cop31"),
-]
-
-GRID = [
-    dict(num=4, kick="ASIA · MARKETS", head="Asia's AI rout deepens",
-         summ="Nikkei −4.9% and KOSPI −5.5%; Hang Seng nears bear "
-              "ground. SoftBank plunges 16%.",
-         kind="markets", chip="CONFIRMED · EXCHANGES"),
-    dict(num=5, kick="NEW YORK · TECH", head="Anthropic joins the big indexes",
-         summ="A day after its record Nasdaq debut, ANT is added to the MSCI "
-              "and FTSE indexes.",
-         kind="ipo", chip="CONFIRMED · WIRES"),
-    dict(num=6, kick="WORLDWIDE · GAMES", head="GTA VI's $2.36bn first day",
-         summ="Sensor Tower estimates 24.58M copies sold on launch day — "
-              "a record.",
-         kind="games", chip="ESTIMATES · SENSOR TOWER"),
-    dict(num=7, kick="RIYADH · ENERGY", head="Oil edges up on supply fears",
-         summ="Brent +0.3% to $92.22; Saudi defences down four more Houthi "
-              "missiles.",
-         kind="oil", chip="CONFIRMED · REUTERS"),
-    dict(num=8, kick="EUROPE · DIPLOMACY", head="Europe reaches for a seat",
-         summ="Leaders say Europe is ready to join talks with Russia on "
-              "ending the war.",
-         kind="diplomacy", chip="CONFIRMED · BBC"),
-    dict(num=9, kick="LONDON · DEFENCE", head="Britain's £260m drone pledge",
-         summ="More than 1,000 drones for Ukraine in a new £260M package.",
-         kind="drones", chip="CONFIRMED · WIRES"),
-    dict(num=10, kick="SCIENCE · SPACE", head="Two hidden companions found",
-         summ="Rubin Observatory preview data reveals two ultra-faint Milky "
-              "Way satellites.",
-         kind="space", chip="CONFIRMED · UW"),
-    dict(num=11, kick="LONDON · EUROPE", head="UK and EU agree youth mobility",
-         summ="London and Brussels are set to agree a youth mobility scheme.",
-         kind="youth", chip="CONFIRMED · BBC"),
-    dict(num=12, kick="MALAWI · CRISIS", head="Fuel crisis turns violent",
-         summ="A deepening fuel shortage triggers violence and economic "
-              "strain.",
-         kind="fuel", chip="CONFIRMED · WIRES"),
-    dict(num=13, kick="TOKYO · PROTEST", head="13,000 march in Tokyo",
-         summ="Protesters rally against the Takaichi government's policies.",
-         kind="protest", chip="CONFIRMED · WIRES"),
-    dict(num=14, kick="SENEGAL · MIGRATION", head="Boat capsize kills four",
-         summ="A boat capsizes off Senegal as the migration surge continues.",
-         kind="boat", chip="CONFIRMED · WIRES"),
-    dict(num=15, kick="WASHINGTON · PRESS", head="Bag your phones",
-         summ="The White House orders journalists to bag their phones after "
-              "the China trip.",
-         kind="phones", chip="CONFIRMED · WIRES"),
-]
-
-BRIEFS = [
-    (16, "Brussels: Coordinated European youth action day — living costs, "
-         "housing and education; more planned for the weekend"),
-    (17, "Genoa: The airport suspends flights after unidentified drones are "
-         "detected"),
-    (18, "France: One dead and 15 injured in a fire at an 18-storey apartment "
-         "building"),
-    (19, "New Caledonia: A 5.6-magnitude earthquake strikes near the islands"),
-    (20, "Washington: The US sanctions the Comancheros biker network and an "
-         "'Ndrangheta web, its Toronto faction included"),
-    (21, "Washington: Trump announces a posthumous pardon for baseball legend "
-         "Pete Rose"),
-    (22, "San Salvador: Bukele formally registers to seek a third presidential "
-         "term"),
-    (23, "Warsaw: Poland prepares a $50bn nuclear-power deal with US firms"),
-    (24, "Menlo Park: Meta revises its 2030 climate targets amid its AI "
-         "infrastructure expansion"),
-    (25, "New Delhi: India-Japan 2+2 — Japanese forces will train at Indian "
-         "ranges; missile and maritime tech agreed"),
-    (26, "Amsterdam: 'The Year of the Ghost' wins Best Film at the IDFA "
-         "documentary festival"),
-    (27, "Cincinnati: Fiona the hippo dies at the zoo, days after swallowing a "
-         "visitor's hat"),
-    (28, "Washington: The White House taps Kirsten Davies as national cyber "
-         "director after widespread outages"),
-    (29, "Washington: The Senate nears a vote on a permitting bill to speed "
-         "power-plant and transmission reviews"),
-    (30, "South Pacific: Cyclone Xavier — RSMC Nadi issues bulletin 39; "
-         "island warning levels unchanged"),
-    (31, "Paris: Macron backs Philippe Diallo's bid for the FIFA presidency"),
-    (32, "Formula 1: Verstappen backs F1's plan to press ahead with its Middle "
-         "East races despite the war"),
-    (33, "Washington: The US war with Iran has cost over $48bn so far, "
-         "officials say"),
-]
-
-PINS = {
-    1: (30.5, 50.4, 6, -6), 2: (84.9, 19.3, 6, 4), 3: (30.7, 36.9, -8, -6),
-    4: (139.7, 35.7, 0, -9), 5: (-74.0, 40.7, -4, -9), 6: (-80.2, 25.8, 0, -6),
-    7: (46.7, 24.6, 4, 0), 8: (13.4, 52.5, 8, -6), 9: (-0.1, 51.5, -8, -8),
-    10: (-70.7, -30.2, 0, -6), 11: (4.35, 50.85, -12, 6),
-    12: (33.8, -13.97, 6, 4), 13: (139.7, 35.7, 13, 7),
-    14: (-17.4, 14.7, -6, 0), 15: (-77.0, 38.9, -12, -8),
-    16: (4.35, 50.85, 10, 10), 17: (8.9, 44.4, 6, 6),
-    18: (2.35, 48.85, -10, -10), 19: (165.5, -21.5, 0, -6),
-    20: (-77.0, 38.9, 13, 8), 21: (-77.0, 38.9, -14, 6),
-    22: (-89.2, 13.7, 0, 6), 23: (21.0, 52.2, 10, -4),
-    24: (-122.2, 37.5, -6, -6), 25: (77.2, 28.6, -8, -6),
-    26: (4.9, 52.4, -14, -12), 27: (-84.5, 39.1, 6, 8),
-    28: (-77.0, 38.9, 0, -14), 29: (-77.0, 38.9, 14, -6),
-    30: (178.4, -18.1, 0, -6), 31: (2.35, 48.85, 12, 8),
-    32: (54.4, 24.5, 8, 6), 33: (-77.0, 38.9, -6, 12),
-}
-
-PIN_CONT = {
-    1: "Europe", 2: "Asia", 3: "Mideast", 4: "Asia", 5: "Americas",
-    6: "Americas", 7: "Mideast", 8: "Europe", 9: "Europe", 10: "Americas",
-    11: "Europe", 12: "Africa", 13: "Asia", 14: "Africa", 15: "Americas",
-    16: "Europe", 17: "Europe", 18: "Europe", 19: "Oceania", 20: "Americas",
-    21: "Americas", 22: "Americas", 23: "Europe", 24: "Americas", 25: "Asia",
-    26: "Europe", 27: "Americas", 28: "Americas", 29: "Americas",
-    30: "Oceania", 31: "Europe", 32: "Mideast", 33: "Mideast",
-}
-
-# Coarse landmass mask: 36 rows x 73 columns of (first, last) column spans.
-MASK_ROWS = [
-    [(8, 11), (27, 30), (48, 50), (59, 61)],
-    [(1, 6), (9, 23), (26, 31), (44, 70)],
-    [(1, 7), (8, 25), (27, 31), (38, 70)],
-    [(2, 8), (9, 26), (28, 30), (37, 70)],
-    [(3, 8), (10, 26), (31, 31), (37, 70)],
-    [(5, 8), (11, 25), (32, 33), (34, 70)],
-    [(10, 24), (32, 32), (33, 69)],
-    [(10, 23), (32, 45), (46, 66)],
-    [(10, 23), (33, 44), (45, 66)],
-    [(10, 23), (33, 43), (44, 63)],
-    [(10, 22), (32, 38), (39, 47), (48, 64)],
-    [(11, 21), (33, 53), (55, 62)],
-    [(11, 17), (33, 48), (49, 53), (54, 60)],
-    [(13, 16), (33, 45), (49, 52), (55, 60)],
-    [(11, 11), (34, 45), (50, 51), (56, 58)],
-    [(34, 44), (46, 47), (56, 58), (60, 61)],
-    [(34, 45), (56, 62)],
-    [(35, 45), (58, 63)],
-    [(17, 22), (35, 45), (58, 64)],
-    [(17, 23), (37, 44), (60, 66)],
-    [(18, 23), (38, 44), (64, 68)],
-    [(18, 24), (38, 44), (60, 67)],
-    [(18, 24), (39, 44), (46, 46), (60, 68)],
-    [(18, 24), (39, 44), (46, 46), (59, 68)],
-    [(18, 23), (39, 44), (46, 46), (59, 67)],
-    [(18, 23), (40, 44), (60, 66)],
-    [(18, 22), (40, 43), (61, 65)],
-    [(18, 22), (40, 43), (61, 65), (71, 71)],
-    [(19, 21), (40, 42), (62, 64)],
-    [(19, 21), (40, 42), (62, 63), (71, 72)],
-    [(19, 20), (63, 63)],
-    [(19, 20), (70, 71)],
-    [(19, 19)],
-    [(19, 19)],
-    [(19, 19)],
-    [(19, 19)],
-]
-MASK_COLS = 73
-MASK_ROWS_N = 36
-
-
-def cell_lonlat(row, col):
-    lon = -168 + (col + 0.5) * (360.0 / MASK_COLS)
-    lat = 78 - (row + 0.5) * (134.0 / MASK_ROWS_N)
-    return lon, lat
-
-
-def continent_of(lon, lat):
-    if lon < -30:
-        return "Americas"
-    if lon >= 112 and lat < -11:
-        return "Oceania"
-    if lon >= 52:
-        return "Asia"
-    if lat >= 42:
-        return "Europe"
-    if lon >= 20 and lat >= 12:
-        return "Mideast"
-    if lat >= 35:
-        return "Europe"
-    return "Africa"
-
-
-def land_cells():
-    """Yield (row, col, continent) for every land cell in the mask."""
-    for r, spans in enumerate(MASK_ROWS):
-        for c0, c1 in spans:
-            for c in range(c0, c1 + 1):
-                lon, lat = cell_lonlat(r, c)
-                yield r, c, continent_of(lon, lat)
-
-
-
-# ---------------------------------------------------------------- banners
-def _label(d, x, y, text, font, fill, anchor="la"):
-    d.text((x, y), text, font=font, fill=fill, anchor=anchor)
-
-
-def banner(d, x, y, w, h, kind, small=False):
-    """Flat procedural banner strip for a grid card."""
-    s = h / 34.0 if small else 1.0
-    k = min(s, 1.0)
-    # For the 34px grid strips the label is shrunk to fit inside the card.
-    lfit = fit_font(SANS_B, "X", 7.0 if small else 7.0, w - 14)
-
-    def lab(txt, fill):
-        d.text((x + 7, y + 4), txt, font=lfit, fill=fill, anchor="la")
-
-    if kind == "markets":
-        d.rectangle((x, y, x + w, y + h), fill=(24, 26, 34))
-        pts = [(x + 10, y + h * 0.30), (x + w * 0.28, y + h * 0.22),
-               (x + w * 0.42, y + h * 0.58), (x + w * 0.60, y + h * 0.44),
-               (x + w * 0.74, y + h * 0.74), (x + w - 18, y + h * 0.66)]
-        d.line(pts, fill=RED, width=max(1, int(round(2 * k))), joint="curve")
-        ax, ay = pts[-1]
-        d.polygon([(ax, ay + 3 * k), (ax - 7 * k, ay - 4 * k),
-                   (ax + 1 * k, ay - 5 * k)], fill=RED)
-        lab("ASIA ROUT", RED)
-
-    elif kind == "ipo":
-        d.rectangle((x, y, x + w, y + h), fill=PALE)
-        base = y + h - 6
-        bw = 13 * k
-        for i in range(3):
-            bx = x + 12 + i * (bw + 6 * k)
-            bh = (10 + i * 7) * k
-            d.rectangle((bx, base - bh, bx + bw, base), fill=ACCENT)
-        tx = x + 12 + 2 * (bw + 6 * k) + bw * 0.5
-        ty = base - (10 + 2 * 7) * k
-        d.line((tx, ty, tx, ty - 9 * k), fill=INK, width=max(1, int(round(k))))
-        d.polygon([(tx, ty - 9 * k), (tx + 7 * k, ty - 7 * k),
-                   (tx, ty - 5 * k)], fill=ACCENT)
-        lab("ANT · INDEXES", INK)
-
-    elif kind == "games":
-        bands = [(46, 26, 66), (74, 32, 70), (110, 40, 74), (156, 54, 74),
-                 (200, 84, 66), (226, 150, 60)]
-        bh = h / 6.0
-        for i, col in enumerate(bands):
-            d.rectangle((x, y + i * bh, x + w, y + (i + 1) * bh), fill=col)
-        d.ellipse((x + w * 0.60, y + h * 0.52, x + w * 0.60 + 15 * k,
-                   y + h * 0.52 + 15 * k), fill=(250, 244, 224))
-        for px in (x + w * 0.22, x + w * 0.40):
-            d.line((px, y + h - 1, px - 2 * k, y + h * 0.42),
-                   fill=(12, 12, 16), width=max(1, int(round(2 * k))))
-            for ang in (-1, 1):
-                d.line((px - 2 * k, y + h * 0.42,
-                        px - 2 * k + ang * 8 * k, y + h * 0.42 - 3 * k),
-                       fill=(12, 12, 16), width=max(1, int(round(2 * k))))
-        lab("$2.36BN DAY ONE", (255, 255, 255))
-
-    elif kind == "oil":
-        d.rectangle((x, y, x + w, y + h), fill=SEA)
-        hy = y + h * 0.62
-        d.polygon([(x + 10, hy), (x + w - 12, hy), (x + w - 20, y + h - 3),
-                   (x + 18, y + h - 3)], fill=(22, 32, 48))
-        dx = x + w * 0.56
-        d.rectangle((dx, hy - 12 * k, dx + 10 * k, hy), fill=(22, 32, 48))
-        d.line((dx + 5 * k, hy - 12 * k, dx + 5 * k, hy - 20 * k),
-               fill=(240, 244, 250), width=max(1, int(round(k))))
-        lab("BRENT $92.22", (255, 255, 255))
-
-    elif kind == "diplomacy":
-        d.rectangle((x, y, x + w, y + h), fill=PALE)
-        ty = y + h * 0.66
-        d.line((x + 14, ty, x + w - 14, ty), fill=INK,
-               width=max(1, int(round(2 * k))))
-        for i in range(3):
-            cx = x + w * (0.30 + i * 0.20)
-            d.rectangle((cx - 5 * k, ty - 5 * k, cx + 5 * k, ty),
-                        fill=ACCENT)
-        for fx in (x + w * 0.16, x + w * 0.84):
-            d.line((fx, ty, fx, ty - 12 * k), fill=GREY,
-                   width=max(1, int(round(k))))
-            d.polygon([(fx, ty - 12 * k), (fx + 8 * k, ty - 9 * k),
-                       (fx, ty - 6 * k)], fill=ACCENT)
-        lab("EUROPE · TALKS", INK)
-
-    elif kind == "drones":
-        d.rectangle((x, y, x + w, y + h), fill=SLATE)
-        for i in range(3):
-            cx = x + w * (0.24 + i * 0.26)
-            cy = y + h * 0.62
-            r = 3.0 * k
-            d.line((cx - 6 * k, cy - 4 * k, cx + 6 * k, cy + 4 * k),
-                   fill=(214, 222, 232), width=max(1, int(round(k))))
-            d.line((cx - 6 * k, cy + 4 * k, cx + 6 * k, cy - 4 * k),
-                   fill=(214, 222, 232), width=max(1, int(round(k))))
-            for ox, oy in ((-6, -4), (6, -4), (-6, 4), (6, 4)):
-                d.ellipse((cx + ox * k - r, cy + oy * k - r,
-                           cx + ox * k + r, cy + oy * k + r),
-                          outline=(214, 222, 232),
-                          width=max(1, int(round(k))))
-        lab("1,000+ DRONES", (255, 255, 255))
-
-    elif kind == "space":
-        d.rectangle((x, y, x + w, y + h), fill=(16, 20, 38))
-        rng = np.random.RandomState(7)
-        for _ in range(26):
-            sx = x + 6 + rng.rand() * (w - 12)
-            sy = y + 5 + rng.rand() * (h - 10)
-            rr = 0.8 if rng.rand() < 0.6 else 1.3
-            d.ellipse((sx - rr, sy - rr, sx + rr, sy + rr),
-                      fill=(226, 230, 242))
-        for gx in (x + w * 0.30, x + w * 0.74):
-            gy = y + h * 0.62
-            d.ellipse((gx - 1.6 * k, gy - 1.6 * k, gx + 1.6 * k, gy + 1.6 * k),
-                      fill=(240, 238, 220))
-            for ang, rx in ((0.35, 9), (2.4, 6)):
-                bb = (gx - rx * k, gy - rx * 0.42 * k,
-                      gx + rx * k, gy + rx * 0.42 * k)
-                d.arc(bb, int(ang * 57.3) + 10, int(ang * 57.3) + 180,
-                      fill=(196, 202, 226), width=max(1, int(round(k))))
-        lab("MILKY WAY", (255, 255, 255))
-
-    elif kind == "youth":
-        d.rectangle((x, y, x + w, y + h), fill=PALE)
-        base = y + h - 6
-        for i, col in enumerate((NAVY, ACCENT)):
-            fx = x + w * (0.34 + i * 0.24)
-            d.line((fx, base, fx, base - 18 * k), fill=GREY,
-                   width=max(1, int(round(k))))
-            d.polygon([(fx, base - 18 * k), (fx + 11 * k, base - 15 * k),
-                       (fx, base - 11 * k)], fill=col)
-        lab("YOUTH MOBILITY", INK)
-
-    elif kind == "fuel":
-        d.rectangle((x, y, x + w, y + h), fill=(30, 30, 30))
-        bx, by = x + w * 0.62, y + h * 0.42
-        d.rounded_rectangle((bx, by, bx + 15 * k, by + 20 * k), radius=2 * k,
-                            fill=(224, 166, 42))
-        d.rectangle((bx + 3 * k, by + 3 * k, bx + 12 * k, by + 8 * k),
-                    fill=(30, 30, 30))
-        d.line((bx + 15 * k, by + 6 * k, bx + 21 * k, by + 9 * k),
-               fill=(224, 166, 42), width=max(1, int(round(2 * k))))
-        d.line((bx + 21 * k, by + 9 * k, bx + 21 * k, by + 19 * k),
-               fill=(224, 166, 42), width=max(1, int(round(2 * k))))
-        lab("MALAWI · FUEL", (224, 166, 42))
-
-    elif kind == "protest":
-        d.rectangle((x, y, x + w, y + h), fill=PALE)
-        base = y + h - 5
-        for i in range(4):
-            cx = x + w * (0.20 + i * 0.13)
-            d.ellipse((cx - 2.2 * k, base - 15 * k, cx + 2.2 * k,
-                       base - 10.6 * k), fill=INK)
-            d.line((cx, base - 10 * k, cx, base), fill=INK,
-                   width=max(1, int(round(2 * k))))
-        for i, sx in enumerate((x + w * 0.30, x + w * 0.58)):
-            top = base - (20 if i == 0 else 17) * k
-            d.line((sx, top, sx, base - 2 * k), fill=GREY,
-                   width=max(1, int(round(k))))
-            d.rectangle((sx - 9 * k, top - 9 * k, sx + 9 * k, top),
-                        outline=INK, width=max(1, int(round(k))))
-        lab("TOKYO · 13,000", INK)
-
-    elif kind == "boat":
-        d.rectangle((x, y, x + w, y + h), fill=SEA)
-        wy = y + h * 0.72
-        d.line((x + 6, wy, x + w - 6, wy + 3 * k), fill=(255, 255, 255),
-               width=max(1, int(round(2 * k))))
-        bx = x + w * 0.40
-        d.polygon([(bx, wy - 2 * k), (bx + 26 * k, wy - 2 * k),
-                   (bx + 21 * k, wy + 7 * k), (bx + 4 * k, wy + 7 * k)],
-                  fill=(20, 30, 44))
-        d.line((bx + 13 * k, wy - 2 * k, bx + 13 * k, wy - 17 * k),
-               fill=(236, 240, 246), width=max(1, int(round(k))))
-        d.polygon([(bx + 13 * k, wy - 17 * k), (bx + 13 * k, wy - 4 * k),
-                   (bx + 24 * k, wy - 6 * k)], fill=(236, 240, 246))
-        lab("SENEGAL · BOAT", (255, 255, 255))
-
-    elif kind == "phones":
-        d.rectangle((x, y, x + w, y + h), fill=SLATE)
-        bx0, by0 = x + w * 0.34, y + h * 0.34
-        bx1, by1 = x + w * 0.66, y + h - 4
-        d.polygon([(bx0 + 5 * k, by0), (bx1 - 5 * k, by0), (bx1, by1),
-                   (bx0, by1)], outline=(226, 232, 240),
-                  width=max(1, int(round(k))))
-        d.line((bx0 + 5 * k, by0 + 3 * k, bx1 - 5 * k, by0 + 3 * k),
-               fill=(226, 232, 240), width=max(1, int(round(k))))
-        px, py = (bx0 + bx1) / 2, (by0 + by1) / 2 + 2
-        d.rounded_rectangle((px - 4 * k, py - 7 * k, px + 4 * k, py + 7 * k),
-                            radius=1.5 * k, outline=(255, 255, 255),
-                            width=max(1, int(round(k))))
-        lab("BAG YOUR PHONES", (255, 255, 255))
-
-
-# ---------------------------------------------------------------- masthead
-def draw_masthead(d):
-    d.text((24, 3), "THE WORLD'S NEWS IN ONE PICTURE",
-           font=F(SANS_B, 12.5), fill=ACCENT, anchor="la")
-    d.text((1000, 3), "33 STORIES · ONE PAGE",
-           font=F(SANS_B, 12.5), fill=INK, anchor="ra")
-
-    ts = 54
-    while ts > 40 and textlen("THE DAILY ATLAS", F(SERIF_B, ts)) > 900:
-        ts -= 2
-    d.text((512, 13), "THE DAILY ATLAS", font=F(SERIF_B, ts), fill=INK,
-           anchor="ma")
-
-    r1 = 13 + ts + 6
-    d.rectangle((24, r1, 1000, r1 + 2), fill=ACCENT)
-    d.line((24, r1 + 5, 1000, r1 + 5), fill=ACCENT, width=1)
-
-    dy = r1 + 9
-    d.text((512, dy), "Friday 20 November 2026", font=F(SERIF_B, 21),
-           fill=ACCENT, anchor="ma")
-
-    sy = dy + 27
-    d.text((24, sy), "EVERY STORY REPORTED ON THE DAY", font=F(SANS, 10.5),
-           fill=GREY, anchor="la")
-    d.text((1000, sy), "FRIDAY EDITION · NO. 20", font=F(SANS_B, 11),
-           fill=INK, anchor="ra")
-    return sy
-
-
-# ---------------------------------------------------------------- region bar
-def draw_region_bar(d, rb_y):
-    segs = [("ASIA 4", CONT["Asia"], 4), ("MIDDLE EAST 4", CONT["Mideast"], 4),
-            ("EUROPE 10", CONT["Europe"], 10), ("AFRICA 2", CONT["Africa"], 2),
-            ("AMERICAS 10", CONT["Americas"], 10),
-            ("OCEANIA 2", CONT["Oceania"], 2), ("GLOBAL 1", SRC, 1)]
-    total_w = 1000 - 24
-    total_n = sum(s[2] for s in segs)
-    MINW = 52.0
-    widths = [total_w * s[2] / total_n for s in segs]
-    # Raise every segment to the 52px floor, taking the shortfall from the
-    # widest segments proportionally to their headroom above the floor.
-    short = sum(max(0.0, MINW - w) for w in widths)
-    if short > 0:
-        widths = [max(MINW, w) for w in widths]
-        while short > 0.01:
-            head = [max(0.0, w - MINW) for w in widths]
-            tot_head = sum(head)
-            if tot_head <= 0.01:
-                break
-            for i in range(len(widths)):
-                if head[i] > 0:
-                    take = min(head[i], short * head[i] / tot_head)
-                    widths[i] -= take
-                    short -= take
-    # correct any residual rounding drift on the widest segment
-    drift = sum(widths) - total_w
-    widths[widths.index(max(widths))] -= drift
-    assert abs(sum(widths) - total_w) < 0.01
-    assert min(widths) >= MINW - 0.01, widths
-    f = F(SANS_B, 10)
-    x = 24.0
-    n_seg = 0
-    for (label, col, _), w in zip(segs, widths):
-        d.rectangle((round(x), rb_y, round(x + w), rb_y + 21), fill=col)
-        lf = fit_font(SANS_B, label, 10, w - 6)
-        d.text((x + w / 2.0, rb_y + 10.5), label, font=lf,
-               fill=(255, 255, 255), anchor="mm")
-        x += w
-        n_seg += 1
-    return n_seg
-
-
-# ---------------------------------------------------------------- stats
-STATS = [
-    ("3", "Kyiv bridges damaged in one night"),
-    ("300,000+", "evacuated ahead of Cyclone Akvan"),
-    ("−4.9%", "the Nikkei 225 on Friday"),
-    ("$2.36bn", "GTA VI estimated first-day sales"),
-    ("0", "fossil-fuel mentions in COP31's draft"),
-    ("£260m", "Britain's drone package for Ukraine"),
-]
-
-
-def draw_stats(d, st_y):
-    d.rectangle((24, st_y, 1000, st_y + 42), fill=CARD, outline=BORDER,
-                width=1)
-    cw = (1000 - 24) / 6.0
-    fv = F(SERIF_B, 19)
-    fc = F(SANS, 8)
-    for i, (val, cap) in enumerate(STATS):
-        x0 = 24 + i * cw
-        cx = x0 + cw / 2.0
-        if i:
-            d.line((round(x0), st_y + 1, round(x0), st_y + 41),
-                   fill=BORDER, width=1)
-        d.text((cx, st_y + 3), val, font=fv, fill=ACCENT, anchor="ma")
-        y = st_y + 27
-        for ln in wrap(cap, fc, cw - 10):
-            assert y + 9.5 <= st_y + 42 + 0.01, "stat caption overflows"
-            d.text((cx, y), ln, font=fc, fill=INK, anchor="ma")
-            y += 9.5
-    return 6
-
-
-# ---------------------------------------------------------------- featured
-def _load_art(kind, w, h):
-    path = os.path.join(HERE, "assets", kind + ".jpg")
-    im = Image.open(path).convert("RGB")
-    aw, ah = im.size
-    target = w / float(h)
-    if aw / float(ah) > target:
-        nw = int(round(ah * target))
-        left = (aw - nw) // 2
-        im = im.crop((left, 0, left + nw, ah))
-    else:
-        nh = int(round(aw / target))
-        top = (ah - nh) // 2
-        im = im.crop((0, top, aw, top + nh))
-    return im.resize((w, h), Image.LANCZOS)
-
-
-def draw_featured(d, img, fy):
-    w, h = 317, 162
-    for i, st in enumerate(FEATURED):
-        x = 24 + i * 329
-        d.rectangle((x, fy, x + w, fy + h), fill=CARD, outline=BORDER,
-                    width=1)
-        art = _load_art(st["art"], w, 74)
-        img.paste(art, (x, fy))
-        DRAWN_ART.add(st["art"])
-
-        # tag bar with left strip
-        d.rectangle((x, fy + 48, x + w, fy + 74), fill=st["tagcol"])
-        strip = INK if st["tagcol"] == ACCENT else ACCENT
-        d.rectangle((x, fy + 48, x + 5, fy + 74), fill=strip)
-        tagf = fit_font(SANS_B, st["tag"], 12, w - 22)
-        d.text((x + 14, fy + 61), st["tag"], font=tagf, fill=(255, 255, 255),
-               anchor="lm")
-
-        chip(d, x + 18, fy + 86, 9.5, st["num"], ACCENT)
-        kickf = fit_font(SANS_B, st["kick"], 10.5, 150)
-        d.text((x + 34, fy + 86), st["kick"], font=kickf, fill=ACCENT,
-               anchor="lm")
-
-        # source chip, right side
-        cf = F(SANS_B, 8)
-        pw = textlen(st["chip"], cf) + 14
-        pill(d, x + 309 - pw, fy + 78, x + 309, fy + 94, 7, SRC)
-        d.text((x + 309 - pw / 2.0, fy + 86), st["chip"], font=cf,
-               fill=(255, 255, 255), anchor="mm")
-        global SOURCE_CHIPS
-        SOURCE_CHIPS += 1
-
-        DRAWN_NUMS.add(st["num"])
-        y = block(d, x + 10, fy + 96, 297, st["head"], F(SERIF_B, 17), 18,
-                  fy + 133, fill=INK)
-        block(d, x + 10, y, 297, st["summ"], F(SERIF, 9.5), 11.5, fy + 160,
-              fill=INK)
-
-
-# ---------------------------------------------------------------- grid
-def draw_grid(d, gy):
-    w, h = 238, 84
-    d.line((24, gy - 8, 1000, gy - 8), fill=INK, width=1)
-    for i, st in enumerate(GRID):
-        col, row = i % 4, i // 4
-        x = 24 + col * 246
-        y0 = gy + row * 92
-        d.rectangle((x, y0, x + w, y0 + h), fill=CARD, outline=BORDER,
-                    width=1)
-        banner(d, x, y0, w, 34, st["kind"], small=True)
-
-        chip(d, x + 13, y0 + 41, 6, st["num"], ACCENT)
-        cf = F(SANS_B, 7)
-        ccol = RED if st["chip"].startswith("CLAIM") else GREY
-        chip_x0 = x + 230 - textlen(st["chip"], cf)
-        # keep the kicker clear of the right-anchored source chip
-        kf = fit_font(SANS_B, st["kick"], 8, chip_x0 - (x + 24) - 5)
-        d.text((x + 24, y0 + 41), st["kick"], font=kf, fill=ACCENT,
-               anchor="lm")
-
-        d.text((x + 230, y0 + 41), st["chip"], font=cf, fill=ccol,
-               anchor="rm")
-        global SOURCE_CHIPS
-        SOURCE_CHIPS += 1
-
-        DRAWN_NUMS.add(st["num"])
-        hfont = F(SERIF_B, 12)
-        hlines = wrap(st["head"], hfont, 222)
-        h_asc, h_desc = hfont.getmetrics()
-        head_bottom = y0 + 47 + (len(hlines) - 1) * 12.5 + h_asc + h_desc
-        block(d, x + 8, y0 + 47, 222, st["head"], hfont, 12.5,
-              y0 + 72, fill=INK)
-        # the summary must begin below the headline's real last line
-        summ_top = max(y0 + 60, head_bottom + 2)
-        ssize = 8.5
-        while True:
-            sfont = F(SERIF, ssize)
-            slh = ssize + 1.0
-            nsl = len(wrap(st["summ"], sfont, 222))
-            if summ_top + nsl * slh <= y0 + 83 + 0.01 or ssize <= 7.5:
-                break
-            ssize -= 0.5
-        block(d, x + 8, summ_top, 222, st["summ"], sfont, slh, y0 + 83,
-              fill=INK)
-        GRID_SEP[st["num"]] = (round(head_bottom, 1), round(summ_top, 1))
-
-
-# ---------------------------------------------------------------- map
-def draw_map(d, mx, my, mw, mh):
-    d.rectangle((mx, my, mx + mw, my + mh), fill=(240, 238, 230),
-                outline=INK, width=1)
-    cw = mw / float(MASK_COLS)
-    ch = mh / float(MASK_ROWS_N)
-    for r, c, cont in land_cells():
-        x0 = mx + c * cw
-        y0 = my + r * ch
-        d.rectangle((round(x0), round(y0), round(x0 + cw + 0.6),
-                     round(y0 + ch + 0.6)), fill=mute(CONT[cont]))
-    for num, (lon, lat, dx, dy) in PINS.items():
-        px = mx + (lon + 168) / 360.0 * mw + dx
-        py = my + (78 - lat) / 134.0 * mh + dy
-        cont = PIN_CONT[num]
-        d.ellipse((px - 7, py - 7, px + 7, py + 7), fill=CONT[cont])
-        d.text((px, py), str(num), font=F(SANS_B, 7.8),
-               fill=(255, 255, 255), anchor="mm")
-
-
-# ---------------------------------------------------------------- briefs
-def layout_briefs(size):
-    """Pick contiguous column breaks balancing heights; return layout."""
-    f = F(SANS, size)
-    lh = size + 2
-    heights = []
-    lines_all = []
-    for _, txt in BRIEFS:
-        ls = wrap(txt, f, 145)
-        lines_all.append(ls)
-        heights.append(len(ls) * lh + 2)
-    n = len(BRIEFS)
-    best = None
-    for a in range(3, 8):
-        for b in range(3, 8):
-            for c in range(3, 8):
-                dd = n - a - b - c
-                if not (3 <= dd <= 7):
-                    continue
-                bounds = [(0, a), (a, a + b), (a + b, a + b + c),
-                          (a + b + c, n)]
-                cols = [sum(heights[s:e]) for s, e in bounds]
-                m = max(cols)
-                if best is None or m < best[0]:
-                    best = (m, bounds, cols)
-    return f, lh, lines_all, heights, best
-
-
-def draw_briefs(d, bx0, by0, max_y=930.0):
-    chosen = None
-    for size in (9.5, 9.25, 9.0, 8.75, 8.5, 8.25, 8.0):
-        f, lh, lines_all, heights, best = layout_briefs(size)
-        if best is None:
-            continue
-        tallest = best[0]
-        chosen = (size, f, lh, lines_all, heights, best)
-        if by0 + tallest <= max_y:
-            break
-    size, f, lh, lines_all, heights, (tallest, bounds, cols) = chosen
-    assert by0 + tallest <= max_y, "briefs do not fit in the band"
-
-    # Stretch the band toward a minimum of about 215px: add the same pad to
-    # every inter-brief gap in every column.
-    largest_count = max(e - s for s, e in bounds)
-    pad = max(0.0, 215.0 - tallest) / float(largest_count)
-    gap = 2.0 + pad
-
-    final_cols = []
-    for s, e in bounds:
-        final_cols.append(sum(heights[s:e]) + pad * (e - s - 1))
-    band_h = max(final_cols)
-
-    for ci, (s, e) in enumerate(bounds):
-        x = bx0 + ci * 165
-        y = by0
-        for bi in range(s, e):
-            num, txt = BRIEFS[bi]
-            chip(d, x + 7, y + 6, 6.5, num, ACCENT)
-            DRAWN_NUMS.add(num)
-            yy = y
-            for ln in lines_all[bi]:
-                d.text((x + 18, yy), ln, font=f, fill=INK, anchor="la")
-                yy += lh
-            y = yy
-            if bi < e - 1:
-                sep = y + gap / 2.0
-                for px in range(int(x + 2), int(x + 145), 5):
-                    d.point((px, sep), fill=BORDER)
-                y += gap
-        assert y - by0 <= band_h + 0.01, "column %d overflows band" % ci
-    return band_h, size, bounds
-
-
-# ---------------------------------------------------------------- bottom band
-def draw_legend(d, cy):
-    """Legend centred on x=512 in the bottom band's header row."""
-    f = F(SANS, 8.5)
-    gaps = 14.0
-    total = sum(7 + 4 + textlen(n, f) for n in CONT_ORDER) \
-        + gaps * (len(CONT_ORDER) - 1)
-    x = 512 - total / 2.0
-    for name in CONT_ORDER:
-        d.ellipse((x, cy - 3.5, x + 7, cy + 3.5), fill=CONT[name])
-        x += 11
-        d.text((x, cy), name, font=f, fill=INK, anchor="lm")
-        x += textlen(name, f) + gaps
-
-
-def draw_bottom(d, img, gy):
-    by = gy + 3 * 84 + 2 * 8 + 12
-    d.line((24, by, 1000, by), fill=INK, width=1)
-    hy = by + 8
-    d.text((24, hy), "WHERE IT HAPPENED", font=F(SANS_B, 12), fill=ACCENT,
-           anchor="la")
-    d.text((340, hy), "ALSO ON FRIDAY 20 NOVEMBER", font=F(SANS_B, 12),
-           fill=INK, anchor="la")
-    draw_legend(d, hy + 22)
-
-    my = hy + 30
-    band_h, bsize, bounds = draw_briefs(d, 340, my)
-    draw_map(d, 24, my, 300, band_h)
-    return my, band_h, bsize, bounds
-
-
-# ---------------------------------------------------------------- date check
-DC_TEXT = ("Left out on purpose — they broke on other days: the Houthi "
-           "strike on Riyadh's PIF Tower (Thu 19 Nov) — the Tbilisi gas "
-           "blast, six dead (Thu 19 Nov) — the ICJ genocide ruling on "
-           "Myanmar (Thu 19 Nov) — the Shenzhen three-way summit "
-           "(Thu 19 Nov) — GTA VI's launch day itself (Thu 19 Nov) "
-           "— Nvidia's record quarter (Tue 17 Nov) — the Siberia "
-           "An-12 crash, 19 killed (Tue 17 Nov).")
-
-
-def draw_date_check(d, dc_y):
-    d.rectangle((24, dc_y, 1000, dc_y + 36), fill=CARD, outline=RED, width=2)
-    d.rectangle((24, dc_y, 86, dc_y + 36), fill=RED)
-    d.text((55, dc_y + 6), "DATE", font=F(SANS_B, 10.5), fill=(255, 255, 255),
-           anchor="ma")
-    d.text((55, dc_y + 19), "CHECK", font=F(SANS_B, 10.5),
-           fill=(255, 255, 255), anchor="ma")
-    f = F(SANS, 9)
-    lines = wrap(DC_TEXT, f, 896)
-    assert len(lines) <= 2, "DATE CHECK text exceeds 2 lines: %d" % len(lines)
-    y = dc_y + 5
-    for ln in lines:
-        assert y + 12 <= dc_y + 36 + 0.01, "DATE CHECK line overflows box"
-        d.text((96, y), ln, font=f, fill=INK, anchor="la")
-        y += 12
-    return len(lines)
-
-
-# ---------------------------------------------------------------- footer
-def draw_footer(d, dc_y):
-    fy2 = dc_y + 42
-    d.line((24, fy2, 1000, fy2), fill=INK, width=1)
-    d.text((512, fy2 + 5), "CLAIM = one side's account, not independently "
-           "confirmed.", font=F(SERIF_I, 9.5), fill=INK, anchor="ma")
-    d.text((512, fy2 + 21), "Every story happened or was first reported on "
-           "Friday 20 November 2026 · Disputed claims are attributed "
-           "· Sources: Reuters · AP · BBC · IMD · "
-           "CNBC · Sensor Tower · UN News",
-           font=F(SANS, 8.5), fill=GREY, anchor="ma")
-
-
-# ---------------------------------------------------------------- main
 def main():
-    global SOURCE_CHIPS
-    img = Image.new("RGB", (SIDE, SIDE), PAPER)
-    d = ImageDraw.Draw(img)
+    # Paths
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    os.chdir(base_dir)
+    assets_dir = os.path.join(base_dir, "assets")
 
-    sy = draw_masthead(d)
-    rb_y = sy + 15
-    n_seg = draw_region_bar(d, rb_y)
-    st_y = rb_y + 27
-    n_cells = draw_stats(d, st_y)
+    # Fonts
+    font_dir = "/usr/share/fonts/truetype/dejavu/"
+    sans_path = os.path.join(font_dir, "DejaVuSans.ttf")
+    sans_bold_path = os.path.join(font_dir, "DejaVuSans-Bold.ttf")
+    serif_path = os.path.join(font_dir, "DejaVuSerif.ttf")
+    serif_bold_path = os.path.join(font_dir, "DejaVuSerif-Bold.ttf")
 
-    fy = st_y + 50
-    draw_featured(d, img, fy)
-    gy = fy + 162 + 16
-    draw_grid(d, gy)
+    def get_font(path, size):
+        return ImageFont.truetype(path, size)
 
-    my, band_h, bsize, bounds = draw_bottom(d, img, gy)
-    dc_y = my + band_h + 8
-    n_dc = draw_date_check(d, dc_y)
-    draw_footer(d, dc_y)
+    # Colors
+    PAPER = (243, 244, 241)
+    CREAM = (250, 250, 247)
+    INK = (19, 28, 43)
+    NAVY = (30, 58, 95)
+    NAVY_DARK = (16, 32, 54)
+    MUTED_RED = (178, 58, 46)
+    LAND = (217, 220, 214)
+    MUTED_GREY = (104, 112, 122)
+    WHITE = (255, 255, 255)
+    BORDER_COLOR = (210, 212, 208)
 
-    # ------------------------------------------------------------ asserts
-    assert not CLIPS, "CLIP failures: %r" % (CLIPS,)
-    assert len(DRAWN_NUMS) == 33, "drawn story numbers: %d" % len(DRAWN_NUMS)
-    assert DRAWN_NUMS == set(range(1, 34)), sorted(set(range(1, 34)) - DRAWN_NUMS)
-    assert DRAWN_ART == {"bridges", "cyclone", "cop31"}, DRAWN_ART
-    assert n_seg == 7, "region segments: %d" % n_seg
-    assert n_cells == 6, "stat cells: %d" % n_cells
-    assert n_dc <= 2
-    assert SOURCE_CHIPS == 15, "source chips: %d" % SOURCE_CHIPS
-    assert len(GRID_SEP) == 12, "grid separation records: %d" % len(GRID_SEP)
-    bad = {n: v for n, v in GRID_SEP.items() if not v[0] < v[1]}
-    assert not bad, "headline/summary collision on grid cards: %r" % (bad,)
+    # Canvas
+    W, H = 1024, 1024
+    img = Image.new("RGB", (W, H), PAPER)
+    draw = ImageDraw.Draw(img)
 
-    img.save(OUT, "PNG", optimize=True)
-    size = os.path.getsize(OUT)
-    assert size <= 1048576, "entry.png too big: %d" % size
+    # Band Stack check (Sum = 1024)
+    bands = [
+        ("top_margin", 20),
+        ("eyebrow", 15),
+        ("masthead", 46),
+        ("gap1", 5),
+        ("region_bar", 22),
+        ("gap2", 6),
+        ("stat_strip", 46),
+        ("gap3", 8),
+        ("featured_row", 196),
+        ("gap4", 8),
+        ("grid_block", 206),
+        ("gap5", 8),
+        ("bottom_band", 258),
+        ("gap6", 6),
+        ("how_sure", 16),
+        ("gap7", 6),
+        ("date_check", 152),
+    ]
+    total_height = sum(h for _, h in bands)
+    assert total_height == 1024, f"Band stack sum is {total_height}, expected 1024"
 
-    with Image.open(OUT) as chk:
-        assert chk.size == (1024, 1024), chk.size
-        assert chk.format == "PNG", chk.format
-    with open(OUT, "rb") as fh:
-        assert fh.read(4) == b"\x89PNG", "not a PNG"
+    current_y = 20
 
-    print("briefs font %.2f, columns %r" % (bsize, bounds))
-    print("band_h %.1f, dc_y %.1f, footer bottom %.1f"
-          % (band_h, dc_y, dc_y + 42))
-    print("wrote %s  %d bytes  (%.1f KiB)" % (OUT, size, size / 1024.0))
-    print("Assertion summary: no CLIP failures; all 33 story numbers drawn; three featured artworks (bridges, cyclone, cop31) loaded and pasted; region bar's 7 segments drawn; stat strip's 6 cells drawn; DATE CHECK text drawn in at most 2 lines (%d lines); source chip drawn for each of the 15 card stories (%d chips); headline/summary separation assertion passed for all %d grid cards." % (n_dc, SOURCE_CHIPS, len(GRID_SEP)))
+    # 1. Eyebrow (height 15)
+    eb_y = current_y
+    eb_font = get_font(sans_bold_path, 11)
+    draw.text((28, eb_y), "THE DAILY ATLAS", fill=INK, font=eb_font)
+    right_text = "33 STORIES - ONE PAGE"
+    bbox = eb_font.getbbox(right_text)
+    rw = bbox[2] - bbox[0]
+    draw.text((996 - rw, eb_y), right_text, fill=INK, font=eb_font)
+    current_y += 15
 
+    # 2. Masthead (height 46)
+    mh_y = current_y
+    mh_date = "FRIDAY 20 NOVEMBER 2026"
+    # Find font size to fit 968 width, start 38, never below 30
+    mh_font_size = 38
+    mh_font = get_font(serif_bold_path, mh_font_size)
+    while mh_font_size > 30:
+        bbox = mh_font.getbbox(mh_date)
+        tw = bbox[2] - bbox[0]
+        if tw <= 968:
+            break
+        mh_font_size -= 1
+        mh_font = get_font(serif_bold_path, mh_font_size)
+    bbox = mh_font.getbbox(mh_date)
+    tw = bbox[2] - bbox[0]
+    th = bbox[3] - bbox[1]
+    mh_x = 28 + (968 - tw) // 2
+    draw.text((mh_x, mh_y + (46 - th) // 2 - 4), mh_date, fill=NAVY, font=mh_font)
+    # Double rule: 2px navy over 1px ink at bottom of masthead
+    draw.line([(28, mh_y + 42), (996, mh_y + 42)], fill=NAVY, width=2)
+    draw.line([(28, mh_y + 44), (996, mh_y + 44)], fill=INK, width=1)
+    current_y += 46
+
+    current_y += 5 # gap
+
+    # 3. Region bar (height 22)
+    rb_y = current_y
+    regions = [
+        ("ASIA 4", 4, (116, 80, 148)),
+        ("MIDDLE EAST 4", 4, (186, 122, 38)),
+        ("EUROPE 10", 10, (58, 84, 128)),
+        ("AFRICA 2", 2, (122, 106, 52)),
+        ("AMERICAS 10", 10, (168, 62, 44)),
+        ("OCEANIA 2", 2, (44, 124, 134)),
+        ("GLOBAL 1", 1, (90, 88, 80)),
+    ]
+    # Mute toward paper (243,244,241) by ~0.45
+    def mute_color(c):
+        return (
+            int(c[0] * 0.55 + 243 * 0.45),
+            int(c[1] * 0.55 + 244 * 0.45),
+            int(c[2] * 0.55 + 241 * 0.45)
+        )
+
+    rx = 28
+    total_w = 968
+    rb_font = get_font(sans_bold_path, 10)
+    for i, (rname, count, col) in enumerate(regions):
+        mcol = mute_color(col)
+        w_seg = int(total_w * count / 33)
+        if i == len(regions) - 1:
+            w_seg = 996 - rx # remainder
+        draw.rectangle([rx, rb_y, rx + w_seg, rb_y + 22], fill=mcol)
+        # label
+        bbox = rb_font.getbbox(rname)
+        lw = bbox[2] - bbox[0]
+        lh = bbox[3] - bbox[1]
+        if lw + 6 > w_seg:
+            # stack name and count
+            parts = rname.split()
+            name_part = " ".join(parts[:-1])
+            count_part = parts[-1]
+            draw.text((rx + (w_seg - rb_font.getbbox(name_part)[2])/2, rb_y + 2), name_part, fill=WHITE, font=rb_font)
+            draw.text((rx + (w_seg - rb_font.getbbox(count_part)[2])/2, rb_y + 11), count_part, fill=WHITE, font=rb_font)
+        else:
+            draw.text((rx + (w_seg - lw)/2, rb_y + (22 - lh)/2 - 2), rname, fill=WHITE, font=rb_font)
+        rx += w_seg
+    draw.line([(28, rb_y + 22), (996, rb_y + 22)], fill=BORDER_COLOR, width=1)
+    current_y += 22
+
+    current_y += 6 # gap
+
+    # 4. Stat strip (height 46)
+    ss_y = current_y
+    draw.rectangle([28, ss_y, 996, ss_y + 46], fill=CREAM, outline=BORDER_COLOR, width=1)
+    stats = [
+        ("3", "Kyiv bridges damaged in one night"),
+        ("372,000", "people evacuated ahead of Cyclone Akvan"),
+        ("−4.9%", "the Nikkei 225 on Friday"),
+        ("$2.36bn", "GTA VI's estimated first-day sales"),
+        ("0", "mentions of fossil fuels in COP31's draft deal"),
+        ("£260m", "Britain's drone package for Ukraine"),
+    ]
+    cell_w = 968 / 6.0
+    val_font = get_font(serif_bold_path, 21)
+    cap_font = get_font(sans_path, 9) # 11px wrapped, or 9-10 to fit 2 lines in 46h
+    for i, (val, cap) in enumerate(stats):
+        cx = 28 + i * cell_w
+        if i > 0:
+            draw.line([(cx, ss_y), (cx, ss_y + 46)], fill=BORDER_COLOR, width=1)
+        # draw value centred around y+14
+        vbox = val_font.getbbox(val)
+        vw = vbox[2] - vbox[0]
+        vh = vbox[3] - vbox[1]
+        draw.text((cx + (cell_w - vw)/2, ss_y + 3), val, fill=INK, font=val_font)
+        # draw caption wrapped to 2 lines
+        # simple wrap helper for stat caption
+        words = cap.split()
+        line1, line2 = "", ""
+        overflow = False
+        for w in words:
+            if not overflow:
+                test_line = (line1 + " " + w).strip()
+                if cap_font.getbbox(test_line)[2] <= cell_w - 8:
+                    line1 = test_line
+                    continue
+                else:
+                    overflow = True
+            line2 = (line2 + " " + w).strip()
+        draw.text((cx + (cell_w - cap_font.getbbox(line1)[2])/2, ss_y + 24), line1, fill=INK, font=cap_font)
+        if line2:
+            draw.text((cx + (cell_w - cap_font.getbbox(line2)[2])/2, ss_y + 34), line2, fill=INK, font=cap_font)
+    current_y += 46
+
+    current_y += 8 # gap
+
+    # 5. Featured row (height 196)
+    feat_y = current_y
+    featured_stories = [
+        {
+            "num": "01.", "kicker": "KYIV · WAR", "chip": "CONFIRMED - REUTERS",
+            "head": "Kyiv's bridges hit in one night",
+            "dek": "Russia's barrage damages three Dnipro crossings. Three water workers killed, about 15 injured.",
+            "image": "bridges.jpg"
+        },
+        {
+            "num": "02.", "kicker": "GOPALPUR · STORM", "chip": "CONFIRMED - IMD",
+            "head": "Cyclone Akvan comes ashore",
+            "dek": "Akvan crosses the coast weakened to 70-80 km/h, below forecast. 372,000 evacuated; no major damage.",
+            "image": "cyclone.jpg"
+        },
+        {
+            "num": "03.", "kicker": "ANTALYA · CLIMATE", "chip": "CONFIRMED - REUTERS",
+            "head": "COP31's last day, no deal",
+            "dek": "The draft drops every mention of fossil fuels. 92,000 attendees; talks may run into the weekend.",
+            "image": "cop31.jpg"
+        },
+    ]
+
+    card_w = 314
+    card_gap = 13
+    feat_font_head = get_font(serif_bold_path, 16)
+    feat_font_dek = get_font(serif_path, 11)
+    feat_font_kicker = get_font(sans_bold_path, 10.5)
+    feat_font_num = get_font(sans_bold_path, 12)
+    feat_font_chip = get_font(sans_bold_path, 8)
+
+    drawn_numbers = set()
+
+    for i, fstory in enumerate(featured_stories):
+        # Dek assertions
+        if i == 0:
+            assert fstory["dek"] == "Russia's barrage damages three Dnipro crossings. Three water workers killed, about 15 injured.", "Dek 1 corrupted"
+        if i == 1:
+            assert fstory["dek"] == "Akvan crosses the coast weakened to 70-80 km/h, below forecast. 372,000 evacuated; no major damage.", "Dek 2 corrupted"
+
+        cx = 28 + i * (card_w + card_gap)
+        draw.rectangle([cx, feat_y, cx + card_w, feat_y + 196], fill=CREAM, outline=BORDER_COLOR, width=1)
+
+        # Artwork at top: 314x140, center crop
+        img_path = os.path.join(assets_dir, fstory["image"])
+        if os.path.exists(img_path):
+            with Image.open(img_path) as im:
+                im = im.convert("RGB")
+                iw, ih = im.size
+                target_w, target_h = 314, 140
+                # center crop to 314:140 ratio
+                target_aspect = target_w / target_h
+                im_aspect = iw / ih
+                if im_aspect > target_aspect:
+                    new_w = int(ih * target_aspect)
+                    left = (iw - new_w) // 2
+                    im_crop = im.crop((left, 0, left + new_w, ih))
+                else:
+                    new_h = int(iw / target_aspect)
+                    top = (ih - new_h) // 2
+                    im_crop = im.crop((0, top, iw, top + new_h))
+                im_thumb = im_crop.resize((target_w, target_h), Image.Resampling.LANCZOS)
+                img.paste(im_thumb, (cx, feat_y))
+
+        # Caption block below (56px height): y from feat_y + 140 to feat_y + 196
+        cy_text = feat_y + 142
+
+        # Kicker row: number + kicker + source chip right anchored
+        num_str = fstory["num"]
+        kicker_str = fstory["kicker"]
+        chip_str = fstory["chip"]
+
+        draw.text((cx + 6, cy_text), num_str, fill=NAVY, font=feat_font_num)
+        num_w = feat_font_num.getbbox(num_str)[2] - feat_font_num.getbbox(num_str)[0]
+
+        draw.text((cx + 8 + num_w, cy_text + 1), kicker_str, fill=NAVY, font=feat_font_kicker)
+
+        # chip right anchored
+        chip_bbox = feat_font_chip.getbbox(chip_str)
+        chip_w = chip_bbox[2] - chip_bbox[0] + 8
+        chip_h = 12
+        chip_x = cx + card_w - 6 - chip_w
+        chip_y = cy_text + 1
+        draw.rectangle([chip_x, chip_y, chip_x + chip_w, chip_y + chip_h], fill=(220, 222, 218))
+        draw.text((chip_x + 4, chip_y + 1), chip_str, fill=INK, font=feat_font_chip)
+
+        cy_text += 16
+
+        # Headline (1 line)
+        head_str = fstory["head"]
+        draw.text((cx + 6, cy_text), head_str, fill=INK, font=feat_font_head)
+        cy_text += 20
+
+        # Dek (wrapped to 2 lines max)
+        dek_str = fstory["dek"]
+        words = dek_str.split()
+        line1, line2 = "", ""
+        overflow = False
+        for w in words:
+            if not overflow:
+                test = (line1 + " " + w).strip()
+                if feat_font_dek.getbbox(test)[2] <= card_w - 12:
+                    line1 = test
+                    continue
+                else:
+                    overflow = True
+            line2 = (line2 + " " + w).strip()
+        draw.text((cx + 6, cy_text), line1, fill=INK, font=feat_font_dek)
+        if line2:
+            draw.text((cx + 6, cy_text + 11), line2, fill=INK, font=feat_font_dek)
+
+        drawn_numbers.add(i + 1)
+
+    current_y += 196
+
+    current_y += 8 # gap
+
+    # 6. Grid block (height 222)
+    grid_y = current_y
+    grid_stories = [
+        {
+            "num": 4, "kicker": "ASIA · MARKETS", "head": "Asia's AI rout deepens",
+            "summ": "Nikkei −4.9% and KOSPI −5.5%; Hang Seng nears bear ground. SoftBank −16%.",
+            "chip": "CONFIRMED - EXCHANGES", "strip": "strip4.jpg"
+        },
+        {
+            "num": 5, "kicker": "NEW YORK · TECH", "head": "Anthropic joins the big indexes",
+            "summ": "A day after its record debut, ANT joins the MSCI and FTSE indexes.",
+            "chip": "CONFIRMED - WIRES", "strip": "strip5.jpg"
+        },
+        {
+            "num": 6, "kicker": "WORLDWIDE · GAMES", "head": "GTA VI's $2.36bn first day",
+            "summ": "Sensor Tower estimates 24.58M copies sold on launch day - a record.",
+            "chip": "ESTIMATES - SENSOR TOWER", "strip": "strip6.jpg"
+        },
+        {
+            "num": 7, "kicker": "RIYADH · ENERGY", "head": "Oil edges up on supply fears",
+            "summ": "Brent +0.3% to $92.22; Saudi defences down four more Houthi missiles.",
+            "chip": "CONFIRMED - REUTERS", "strip": "strip7.jpg"
+        },
+        {
+            "num": 8, "kicker": "EUROPE · DIPLOMACY", "head": "Europe reaches for a seat",
+            "summ": "Leaders say Europe is ready to join talks with Russia on the war.",
+            "chip": "CONFIRMED - BBC", "strip": "strip8.jpg"
+        },
+        {
+            "num": 9,
+            "kicker": "LONDON · DEFENCE",
+            "head": "Britain's drone package",
+            "summ": "More than 1,000 drones for Ukraine in a new £260m package.",
+            "chip": "CONFIRMED - WIRES",
+            "strip": "strip9.jpg"
+        },
+        {
+            "num": 10, "kicker": "SCIENCE · SPACE", "head": "Two hidden companions found",
+            "summ": "Rubin preview data reveals two ultra-faint Milky Way satellites.",
+            "chip": "CONFIRMED - UW", "strip": "strip10.jpg"
+        },
+        {
+            "num": 11, "kicker": "LONDON · EUROPE", "head": "UK and EU agree youth mobility",
+            "summ": "London and Brussels are set to agree a youth mobility scheme.",
+            "chip": "CONFIRMED - BBC", "strip": "strip11.jpg"
+        },
+        {
+            "num": 12, "kicker": "MALAWI · CRISIS", "head": "Fuel crisis turns violent",
+            "summ": "A deepening fuel shortage triggers violence and economic strain.",
+            "chip": "CONFIRMED - WIRES", "strip": "strip12.jpg"
+        },
+        {
+            "num": 13, "kicker": "TOKYO · PROTEST", "head": "13,000 march in Tokyo",
+            "summ": "Protesters rally against the Takaichi government's policies.",
+            "chip": "CONFIRMED - WIRES", "strip": "strip13.jpg"
+        },
+        {
+            "num": 14, "kicker": "SENEGAL · MIGRATION",
+            "head": "Boat capsize kills four",
+            "summ": "A boat capsizes off Senegal as the migration surge continues.",
+            "chip": "CONFIRMED - WIRES", "strip": "strip14.jpg"
+        },
+        {
+            "num": 15, "kicker": "WASHINGTON · PRESS",
+            "head": "Bag your phones",
+            "summ": "The White House orders journalists to bag phones after the China trip.",
+            "chip": "CONFIRMED - WIRES", "strip": "strip15.jpg"
+        },
+    ]
+
+    g_card_w = 236
+    g_card_h = 70
+    g_cols = 4
+    g_rows = 3
+    g_x_gap = 8
+    g_y_gap = 4 # row height 70 + 4 gap = 74 step
+
+    grid_font_head = get_font(serif_bold_path, 12)
+    grid_font_summ = get_font(serif_path, 11)
+    grid_font_kicker = get_font(sans_bold_path, 8.5)
+    grid_font_num = get_font(sans_bold_path, 11)
+    grid_font_chip = get_font(sans_bold_path, 7.5)
+
+    for idx, gstory in enumerate(grid_stories):
+        col = idx % g_cols
+        row = idx // g_cols
+        gx = 28 + col * (g_card_w + g_x_gap)
+        gy = grid_y + row * 74
+
+        draw.rectangle([gx, gy, gx + g_card_w, gy + g_card_h], fill=CREAM, outline=BORDER_COLOR, width=1)
+
+        # Scene strip at top: 236x22
+        strip_path = os.path.join(assets_dir, gstory["strip"])
+        if os.path.exists(strip_path):
+            with Image.open(strip_path) as im:
+                im = im.convert("RGB")
+                iw, ih = im.size
+                tw, th = 236, 22
+                t_aspect = tw / th
+                im_aspect = iw / ih
+                if im_aspect > t_aspect:
+                    new_w = int(ih * t_aspect)
+                    left = (iw - new_w) // 2
+                    im_crop = im.crop((left, 0, left + new_w, ih))
+                else:
+                    new_h = int(iw / t_aspect)
+                    top = (ih - new_h) // 2
+                    im_crop = im.crop((0, top, iw, top + new_h))
+                im_thumb = im_crop.resize((tw, th), Image.Resampling.LANCZOS)
+                img.paste(im_thumb, (gx, gy))
+        else:
+            # flat muted tint panel if missing
+            draw.rectangle([gx, gy, gx + 236, gy + 22], fill=(217, 220, 214))
+
+        # Text inside card below strip (y from gy + 23 to gy + 70)
+        gt_y = gy + 23
+
+        # Chip row: printed number + kicker + source chip
+        num_str = f"{gstory['num']:02d}."
+        kicker_str = gstory["kicker"]
+        chip_str = gstory["chip"]
+
+        draw.text((gx + 4, gt_y), num_str, fill=NAVY, font=grid_font_num)
+        num_w = grid_font_num.getbbox(num_str)[2] - grid_font_num.getbbox(num_str)[0]
+
+        draw.text((gx + 6 + num_w, gt_y + 1), kicker_str, fill=NAVY, font=grid_font_kicker)
+
+        # Source chip right anchored
+        chip_bbox = grid_font_chip.getbbox(chip_str)
+        chip_w = chip_bbox[2] - chip_bbox[0] + 6
+        chip_h = 10
+        chip_x = gx + g_card_w - 4 - chip_w
+        chip_y = gt_y + 1
+
+        is_claim = chip_str.startswith("CLAIM") or chip_str.startswith("ESTIMATES")
+        chip_bg = NAVY_DARK if is_claim else (220, 222, 218)
+        chip_fg = WHITE if is_claim else INK
+        draw.rectangle([chip_x, chip_y, chip_x + chip_w, chip_y + chip_h], fill=chip_bg)
+        draw.text((chip_x + 3, chip_y), chip_str, fill=chip_fg, font=grid_font_chip)
+
+        gt_y += 12
+
+        # Headline (1 line)
+        head_str = gstory["head"]
+        draw.text((gx + 4, gt_y), head_str, fill=INK, font=grid_font_head)
+        gt_y += 14
+
+        # Summary (wrapped to 2 lines max)
+        summ_str = gstory["summ"]
+        words = summ_str.split()
+        line1, line2 = "", ""
+        overflow = False
+        for w in words:
+            if not overflow:
+                test = (line1 + " " + w).strip()
+                if grid_font_summ.getbbox(test)[2] <= g_card_w - 8:
+                    line1 = test
+                    continue
+                else:
+                    overflow = True
+            line2 = (line2 + " " + w).strip()
+        draw.text((gx + 4, gt_y), line1, fill=INK, font=grid_font_summ)
+        if line2:
+            draw.text((gx + 4, gy + g_card_h - 11), line2, fill=INK, font=grid_font_summ)
+
+        drawn_numbers.add(gstory["num"])
+
+    current_y += 206
+
+    current_y += 8 # gap
+
+    # 7. Bottom band (height 258)
+    bb_y = current_y
+    bb_height = 258
+
+    section_head_font = get_font(sans_bold_path, 12)
+    draw.text((28, bb_y), "WHERE IT HAPPENED", fill=NAVY, font=section_head_font)
+    draw.text((392, bb_y), "ALSO ON FRIDAY 20 NOVEMBER", fill=INK, font=section_head_font)
+
+    content_bb_y = bb_y + 18
+    content_bb_h = bb_height - 18
+
+    # Map LEFT: x 28..368 (width 340)
+    map_x, map_y = 28, content_bb_y
+    map_w, map_h = 340, content_bb_h
+    draw.rectangle([map_x, map_y, map_x + map_w, map_y + map_h], fill=PAPER, outline=BORDER_COLOR, width=1)
+
+    # Render land cells from mask
+    land_mask_spans = {
+        1: [(8,11), (27,30), (48,50), (59,61)],
+        2: [(1,6), (9,23), (26,31), (44,70)],
+        3: [(1,7), (8,25), (27,31), (38,70)],
+        4: [(2,8), (9,26), (28,30), (37,70)],
+        5: [(3,8), (10,26), (31,31), (37,70)],
+        6: [(5,8), (11,25), (32,33), (34,70)],
+        7: [(10,24), (32,32), (33,69)],
+        8: [(10,23), (32,45), (46,66)],
+        9: [(10,23), (33,44), (45,66)],
+        10: [(10,23), (33,43), (44,63)],
+        11: [(10,22), (32,38), (39,47), (48,64)],
+        12: [(11,21), (33,53), (55,62)],
+        13: [(11,17), (33,48), (49,53), (54,60)],
+        14: [(13,16), (33,45), (49,52), (55,60)],
+        15: [(11,11), (34,45), (50,51), (56,58)],
+        16: [(34,44), (46,47), (56,58), (60,61)],
+        17: [(34,45), (56,62)],
+        18: [(35,45), (58,63)],
+        19: [(17,22), (35,45), (58,64)],
+        20: [(17,23), (37,44), (60,66)],
+        21: [(18,23), (38,44), (64,68)],
+        22: [(18,24), (38,44), (60,67)],
+        23: [(18,24), (39,44), (46,46), (60,68)],
+        24: [(18,24), (39,44), (46,46), (59,68)],
+        25: [(18,23), (39,44), (46,46), (59,67)],
+        26: [(18,23), (40,44), (60,66)],
+        27: [(18,22), (40,43), (61,65)],
+        28: [(18,22), (40,43), (61,65), (71,71)],
+        29: [(19,21), (40,42), (62,64)],
+        30: [(19,21), (40,42), (62,63), (71,72)],
+        31: [(19,20), (63,63)],
+        32: [(19,20), (70,71)],
+        33: [(19,19)],
+        34: [(19,19)],
+        35: [(19,19)],
+        36: [(19,19)],
+    }
+
+    cell_w_map = map_w / 73.0
+    cell_h_map = map_h / 36.0
+
+    for r in range(1, 37):
+        spans = land_mask_spans.get(r, [])
+        for (c_start, c_end) in spans:
+            for c in range(c_start, c_end + 1):
+                x1 = map_x + (c - 1) * cell_w_map
+                y1 = map_y + (r - 1) * cell_h_map
+                x2 = x1 + cell_w_map + 0.6
+                y2 = y1 + cell_h_map + 0.6
+                draw.rectangle([x1, y1, x2, y2], fill=LAND, outline=LAND)
+
+    # Map Pins
+    map_pins_data = {
+        1: (30.5, 50.4, 6, -6),
+        2: (84.9, 19.3, 6, 4),
+        3: (30.7, 36.9, -8, -6),
+        4: (139.7, 35.7, 0, -9),
+        5: (-74.0, 40.7, -4, -9),
+        6: (-80.2, 25.8, 0, -6),
+        7: (46.7, 24.6, 4, 0),
+        8: (13.4, 52.5, 8, -6),
+        9: (-0.1, 51.5, -8, -8),
+        10: (-70.7, -30.2, 0, -6),
+        11: (4.35, 50.85, -12, 6),
+        12: (33.8, -13.97, 6, 4),
+        13: (139.7, 35.7, 13, 7),
+        14: (-17.4, 14.7, -6, 0),
+        15: (-77.0, 38.9, -12, -8),
+        16: (4.35, 50.85, 10, 10),
+        17: (8.9, 44.4, 6, 6),
+        18: (2.35, 48.85, -10, -10),
+        19: (165.5, -21.5, 0, -6),
+        20: (-77.0, 38.9, 13, 8),
+        21: (-77.0, 38.9, -14, 6),
+        22: (-89.2, 13.7, 0, 6),
+        23: (21.0, 52.2, 10, -4),
+        24: (-122.2, 37.5, -6, -6),
+        25: (77.2, 28.6, -8, -6),
+        26: (4.9, 52.4, -14, -12),
+        27: (-84.5, 39.1, 6, 8),
+        28: (-77.0, 38.9, 0, -14),
+        29: (-77.0, 38.9, 14, -6),
+        30: (178.4, -18.1, 0, -6),
+        31: (2.35, 48.85, 12, 8),
+        32: (54.4, 24.5, 8, 6),
+        33: (-77.0, 38.9, -6, 12),
+    }
+
+    scale_x = map_w / 300.0
+    scale_y = map_h / 215.0
+
+    pin_positions = []
+    for num, (lon, lat, dx, dy) in map_pins_data.items():
+        px = map_x + (lon + 168) / 360.0 * map_w + dx * scale_x
+        py = map_y + (78 - lat) / 134.0 * map_h + dy * scale_y
+        pin_positions.append((num, px, py))
+
+    # Collision resolution for minimum 22px separation
+    for _ in range(10):
+        moved = False
+        for i in range(len(pin_positions)):
+            for j in range(i + 1, len(pin_positions)):
+                num1, x1, y1 = pin_positions[i]
+                num2, x2, y2 = pin_positions[j]
+                dist = np.hypot(x1 - x2, y1 - y2)
+                if dist < 22 and dist > 0:
+                    angle = np.arctan2(y2 - y1, x2 - x1)
+                    overlap = (22 - dist) / 2.0
+                    x1 -= np.cos(angle) * overlap
+                    y1 -= np.sin(angle) * overlap
+                    x2 += np.cos(angle) * overlap
+                    y2 += np.sin(angle) * overlap
+                    pin_positions[i] = (num1, x1, y1)
+                    pin_positions[j] = (num2, x2, y2)
+                    moved = True
+        if not moved:
+            break
+
+    pin_font = get_font(sans_bold_path, 11)
+    for num, px, py in pin_positions:
+        # Ensure inside map box
+        px = max(map_x + 9, min(map_x + map_w - 9, px))
+        py = max(map_y + 9, min(map_y + map_h - 9, py))
+        draw.ellipse([px - 9, py - 9, px + 9, py + 9], fill=NAVY, outline=WHITE)
+        num_str = str(num)
+        bbox = pin_font.getbbox(num_str)
+        nw = bbox[2] - bbox[0]
+        nh = bbox[3] - bbox[1]
+        draw.text((px - nw / 2, py - nh / 2 - 2), num_str, fill=WHITE, font=pin_font)
+        drawn_numbers.add(num)
+
+    # Briefs RIGHT: stories 16-33 in two columns inside x 392..996 (each 296 wide, 12px gutter)
+    briefs_data = [
+        (16, "Brussels", "Youth action day - living costs, housing, education"),
+        (17, "Genoa", "Airport suspends flights after unidentified drones detected"),
+        (18, "France", "One dead, 15 hurt in fire at 18-storey apartment block"),
+        (19, "New Caledonia", "5.6-magnitude earthquake strikes near the islands"),
+        (20, "Washington", "US sanctions Comancheros biker network and an 'Ndrangheta web"),
+        (21, "Washington", "Trump announces posthumous pardon for baseball legend Pete Rose"),
+        (22, "San Salvador", "Bukele registers to seek a third presidential term"),
+        (23, "Warsaw", "Poland prepares a $50bn nuclear-power deal with US firms"),
+        (24, "Menlo Park", "Meta revises 2030 climate targets amid AI expansion"),
+        (25, "New Delhi", "India-Japan 2+2 - Japanese forces to train at Indian ranges"),
+        (26, "Amsterdam", "'The Year of the Ghost' wins Best Film at IDFA festival"),
+        (27, "Cincinnati", "Fiona the hippo dies at the zoo after swallowing a visitor's hat"),
+        (28, "Washington", "White House taps Kirsten Davies as national cyber director"),
+        (29, "Washington", "Senate nears vote on bill to speed power-plant reviews"),
+        (30, "South Pacific", "Cyclone Xavier - bulletin 39 issued; warning levels unchanged"),
+        (31, "Paris", "Macron backs Diallo's bid for the FIFA presidency"),
+        (32, "Formula 1", "Verstappen backs F1 pressing on with Middle East races"),
+        (33, "Washington", "US war with Iran has cost over $48bn so far, officials say"),
+    ]
+
+    # Verify no leading number pattern in brief text
+    import re
+    for num, place, summ in briefs_data:
+        full_text = f"{place}: {summ}"
+        assert not re.match(r"^\d+[\.\)]", full_text), f"Brief {num} contains leading number pattern"
+
+    col_w = 296
+    gutter = 12
+    col1_x = 392
+    col2_x = 392 + col_w + gutter
+
+    brief_place_font = get_font(sans_bold_path, 10.5)
+    brief_summ_font = get_font(sans_path, 10.5)
+    badge_font = get_font(sans_bold_path, 9.5)
+
+    # We have 18 briefs: 9 per column
+    # Let's compute vertical positions dynamically or allocate evenly across content_bb_h
+    col1_briefs = briefs_data[:9]
+    col2_briefs = briefs_data[9:]
+
+    def draw_brief_column(briefs_list, start_x, start_y, available_h):
+        num_items = len(briefs_list)
+        row_h = available_h / num_items
+        for i, (num, place, summ) in enumerate(briefs_list):
+            by = start_y + i * row_h + 2
+
+            # Draw Badge: filled navy circle radius 8, white numeral
+            bx = start_x + 8
+            b_cy = by + 6
+            draw.ellipse([bx - 8, b_cy - 8, bx + 8, b_cy + 8], fill=NAVY)
+            num_str = str(num)
+            bbox = badge_font.getbbox(num_str)
+            nw = bbox[2] - bbox[0]
+            nh = bbox[3] - bbox[1]
+            draw.text((bx - nw / 2, b_cy - nh / 2 - 2), num_str, fill=WHITE, font=badge_font)
+
+            # Text starting at bx + 14
+            text_x = start_x + 22
+            text_w = col_w - 22
+
+            # Place lead + summary wrapped
+            full_str = f"{place}: {summ}"
+            # wrap lines manually or measure
+            words = full_str.split()
+            line1, line2 = "", ""
+            overflow = False
+            # bold the place part: we can draw place in bold, rest in normal sans
+            # For simplicity, measure words
+            for w in words:
+                if not overflow:
+                    test = (line1 + " " + w).strip()
+                    if brief_summ_font.getbbox(test)[2] <= text_w:
+                        line1 = test
+                        continue
+                    else:
+                        overflow = True
+                line2 = (line2 + " " + w).strip()
+
+            draw.text((text_x, by), line1, fill=INK, font=brief_summ_font)
+            if line2:
+                draw.text((text_x, by + 11), line2, fill=INK, font=brief_summ_font)
+
+            drawn_numbers.add(num)
+
+    draw_brief_column(col1_briefs, col1_x, content_bb_y, content_bb_h)
+    draw_brief_column(col2_briefs, col2_x, content_bb_y, content_bb_h)
+
+    current_y += 306
+
+    current_y += 6 # gap
+
+    # 8. HOW SURE (height 16)
+    hs_y = current_y
+    hs_font = get_font(sans_path, 9.5)
+    hs_bold_font = get_font(sans_bold_path, 9.5)
+
+    # Draw chips and text
+    hx = 28
+    draw.text((hx, hs_y + 2), "HOW SURE -", fill=INK, font=hs_bold_font)
+    hx += 70
+
+    # CONFIRMED chip
+    draw.rectangle([hx, hs_y + 2, hx + 58, hs_y + 13], fill=NAVY)
+    draw.text((hx + 4, hs_y + 2), "CONFIRMED", fill=WHITE, font=hs_bold_font)
+    hx += 62
+    draw.text((hx, hs_y + 2), ": reported by wire services on the day -", fill=INK, font=hs_font)
+    hx += 215
+
+    # CLAIM chip (outline)
+    draw.rectangle([hx, hs_y + 2, hx + 36, hs_y + 13], outline=NAVY, width=1)
+    draw.text((hx + 4, hs_y + 2), "CLAIM", fill=NAVY, font=hs_bold_font)
+    hx += 40
+    draw.text((hx, hs_y + 2), ": one side's account or estimate -", fill=INK, font=hs_font)
+    hx += 175
+
+    # FORECAST chip (dashed outline / outline)
+    draw.rectangle([hx, hs_y + 2, hx + 52, hs_y + 13], outline=NAVY, width=1)
+    draw.text((hx + 3, hs_y + 2), "FORECAST", fill=NAVY, font=hs_bold_font)
+    hx += 56
+    draw.text((hx, hs_y + 2), ": scheduled or expected", fill=INK, font=hs_font)
+
+    current_y += 16
+
+    current_y += 6 # gap
+
+    # 9. DATE CHECK box (height 136, drawn LAST)
+    dc_y = current_y
+    dc_h = 136
+    draw.rectangle([28, dc_y, 996, dc_y + dc_h], fill=CREAM, outline=BORDER_COLOR, width=1)
+    # 16px muted-red header bar
+    draw.rectangle([28, dc_y, 996, dc_y + 16], fill=MUTED_RED)
+    dc_head_font = get_font(sans_bold_path, 9)
+    draw.text((36, dc_y + 2), "DATE CHECK - every story above is Friday 20 November 2026", fill=WHITE, font=dc_head_font)
+
+    # Body: two groups in 4 columns x 5 rows of cells (19 cells total)
+    left_out = [
+        ("Riyadh", "PIF Tower strike", "Thu 19 Nov"),
+        ("Hormuz", "tanker hit", "Thu 19 Nov"),
+        ("ICJ", "Myanmar genocide", "Thu 19 Nov"),
+        ("Shenzhen", "three-way summit", "Thu 19 Nov"),
+        ("Tbilisi", "gas blast, 6 dead", "Thu 19 Nov"),
+        ("GTA VI", "launch day itself", "Thu 19 Nov"),
+        ("Anthropic", "Nasdaq debut", "Thu 19 Nov"),
+        ("Wall St", "Thursday slide", "Thu 19 Nov"),
+        ("Senate", "war-powers vote", "Thu 19 Nov"),
+        ("ATP Finals", "semis line-up", "Thu 19 Nov"),
+        ("Voyager 1", "one light-day", "Thu 19 Nov"),
+        ("Bao", "star-merger paper", "Tue 18 Nov"),
+        ("Nvidia", "record quarter", "Tue 17 Nov"),
+        ("Siberia", "An-12 crash", "Tue 17 Nov"),
+    ]
+    not_yet = [
+        ("COP31", "final deal", "into the weekend"),
+        ("ATP Finals", "semis, Turin", "Sat 21 Nov"),
+        ("BepiColombo", "at Mercury", "Sat 21 Nov"),
+        ("Ebola trial", "first doses", "26 Nov"),
+        ("OPEC+", "ministerials", "29 Nov"),
+    ]
+
+    dc_label_font = get_font(sans_bold_path, 9.5)
+    dc_cell_font = get_font(sans_path, 9)
+    dc_cell_bold_font = get_font(sans_bold_path, 9)
+
+    body_y = dc_y + 18
+    draw.text((36, body_y), "LEFT OUT - OTHER DAYS:", fill=NAVY, font=dc_label_font)
+    body_y += 12
+
+    # 4 columns for left out items
+    col_width_dc = 230
+    row_height_dc = 8
+    for idx, (place, desc, date_str) in enumerate(left_out):
+        c = idx % 4
+        r = idx // 4
+        cell_x = 36 + c * col_width_dc
+        cell_y = body_y + r * row_height_dc
+        item_text = f"{place} - {desc} - "
+        draw.text((cell_x, cell_y), item_text, fill=INK, font=dc_cell_font)
+        tw = dc_cell_font.getbbox(item_text)[2]
+        draw.text((cell_x + tw, cell_y), date_str, fill=NAVY, font=dc_cell_bold_font)
+
+        last_y = cell_y
+
+    body_y += 4 * row_height_dc + 4
+    draw.text((36, body_y), "NOT YET:", fill=NAVY, font=dc_label_font)
+    body_y += 12
+
+    for idx, (place, desc, date_str) in enumerate(not_yet):
+        c = idx % 4
+        r = idx // 4
+        cell_x = 36 + c * col_width_dc
+        cell_y = body_y + r * row_height_dc
+        item_text = f"{place} - {desc} - "
+        draw.text((cell_x, cell_y), item_text, fill=INK, font=dc_cell_font)
+        tw = dc_cell_font.getbbox(item_text)[2]
+        draw.text((cell_x + tw, cell_y), date_str, fill=NAVY, font=dc_cell_bold_font)
+
+        last_y = cell_y
+
+    # Assertions
+    print(f"dc_y={dc_y}")
+    print(f"body_y={body_y}")
+    print(f"last_y={last_y}")
+    assert len(left_out) == 14, f"Expected 14 left-out items, got {len(left_out)}"
+    assert len(not_yet) == 5, f"Expected 5 not-yet items, got {len(not_yet)}"
+    assert last_y + 9 <= 1018, f"Last item too low: {last_y + 9}"
+
+    # Verify all 33 story numbers drawn
+    assert drawn_numbers == set(range(1, 34)), f"Missing story numbers: {set(range(1, 34)) - drawn_numbers}"
+
+    # Save output
+    output_path = os.path.join(base_dir, "entry.png")
+    img.save(output_path, "PNG")
+
+    # Assertions on entry.png
+    assert os.path.exists(output_path), "entry.png not created"
+    assert img.size == (1024, 1024), f"Incorrect dimensions: {img.size}"
+    file_size = os.path.getsize(output_path)
+    assert file_size <= 1048576, f"File size too large: {file_size} bytes"
+
+    with open(output_path, "rb") as fh:
+        magic = fh.read(8)
+    assert magic == b'\x89PNG\r\n\x1a\n', "Invalid PNG magic bytes"
+
+    # Compute sha256
+    sha256_hash = hashlib.sha256(open(output_path, "rb").read()).hexdigest()
+    print(f"Successfully generated entry.png: size={file_size} bytes, sha256={sha256_hash}")
 
 if __name__ == "__main__":
     main()
